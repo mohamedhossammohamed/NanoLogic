@@ -191,9 +191,9 @@ If you use this work in research, please cite:
 ```bibtex
 @software{neurosham4_2026,
   author = {Mohamed Hossam},
-  title = {Neuro-SHA-M4: Neuro-Symbolic SHA-256 Cryptanalysis on Apple Silicon},
+  title = {NanoLogic: Neuro-Symbolic SHA-256 Cryptanalysis on Apple Silicon},
   year = {2026},
-  url = {https://github.com/YOUR_USERNAME/NanoLogic}
+  url = {https://github.com/mohammedhossammohammed/NanoLogic}
 }
 ```
 # NanoLogic
