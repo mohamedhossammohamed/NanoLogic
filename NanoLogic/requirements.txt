@@ -1,0 +1,7 @@
+torch
+numpy
+einops
+pycosat
+psutil
+rich
+z3-solver
