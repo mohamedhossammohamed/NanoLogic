@@ -56,7 +56,7 @@ def main():
     print("🌉 Bridge: Ready (Waiting for Solver...)")
 
     # 5. Memory Guard
-    memory_guard = MemoryGuard(limit_gb=10.0)
+    memory_guard = MemoryGuard(limit_gb=14.0)
 
     # 6. Training Components
     criterion = StateMatchingLoss()

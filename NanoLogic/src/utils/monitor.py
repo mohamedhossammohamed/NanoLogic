@@ -10,7 +10,7 @@ class MemoryGuard:
     Polls RAM usage and aggressively clears caches or pauses execution 
     if the system approaches the danger zone (Swap Thrashing).
     """
-    def __init__(self, limit_gb: float = 10.0, poll_interval: int = 10):
+    def __init__(self, limit_gb: float = 14.0, poll_interval: int = 10):
         self.limit_gb = limit_gb
         self.poll_interval = poll_interval
         self.step_counter = 0

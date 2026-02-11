@@ -3,40 +3,50 @@ from typing import List
 
 @dataclass
 class Config:
-    # Model Architecture
-    dim: int = 256              # Reduced from 512 to fit in MPS memory
-    n_layers: int = 24          # Matches simplified logic depth
-    n_heads: int = 8            # Standard attention heads (if used) or parallel logic paths
-    vocab_size: int = 2         # Binary (0, 1) or Ternary (-1, 0, 1)
+    # ── Model Architecture ( The "Heavy Lifter" ) ───────────────────────
+    # Strategy: Width > Depth. A wider bus (512) allows complex XOR/ROT 
+    # logic to happen in a single step, while fewer layers (12) saves RAM.
+    dim: int = 1024              # WAS: 256. Doubled for logic capacity.
+    n_layers: int = 12          # WAS: 24. Halved to fit in RAM with dim=512.
+    n_heads: int = 16
+               # Parallel logic paths (Vertical Wiring).
+    vocab_size: int = 2         # Binary (0, 1) input. Output is ternary weights.
 
-    # Wiring & Logic
-    wiring_mode: str = "static_sha256"  # "static_sha256", "random", "learnable"
-    rounds: int = 64            # Full SHA-256 rounds
+    # ── Wiring & Logic ──────────────────────────────────────────────────
+    wiring_mode: str = "static_sha256"  # Hard-coded SHA-256 graph.
+    rounds: int = 64            # The final goal.
 
-    # Pathfinder (ResNet)
-    pathfinder_depth: int = 10  # Number of Residual Blocks
+    # ── Pathfinder (ResNet) ─────────────────────────────────────────────
+    pathfinder_depth: int = 10  # Auxiliary network depth.
     
-    # Memory Guard
-    grad_accum_steps: int = 32  # Effective batch size = batch_size * grad_accum = 64
-    num_workers: int = 0        # Main Thread only (No fork overhead)
-    pin_memory: bool = False    # Disable pinned memory for RAM savings
+    # ── Memory Guard ( M4 Optimization ) ────────────────────────────────
+    # Effective Batch Size = batch_size * grad_accum_steps = 64
+    batch_size: int = 2         # Kept minimal to prevent activation explosion.
+    grad_accum_steps: int = 32  # Accumulate 32 micro-batches before stepping.
+    num_workers: int = 0        # 0 = Main Thread (Crucial for MacOS/MPS stability).
+    pin_memory: bool = False    # Disabled to save physical RAM.
 
-    # Training
-    batch_size: int = 2         # Slashed from 8 to prevent activation explosion
-    lr: float = 1e-4
-    warmup_steps: int = 1000
+    # ── Training ( The "Precision" Protocol ) ───────────────────────────
+    lr: float = 3e-5            # WAS: 1e-4. Slowed down 3x for Lion stability.
+    weight_decay: float = 0.01  # Standard for Lion.
+    warmup_steps: int = 1000    # Gentle wake-up for the optimizer.
     
-    # Solver
-    max_solver_steps: int = 10000
+    # Solver / Loop Limits
+    max_solver_steps: int = 1000000000  # Effectively Infinite. (Ctrl+C to stop)
 
-    # ── Curriculum ──────────────────────────────────────────────────────
-    # Rounds schedule: training starts at start_round and doubles each phase.
-    # Training does NOT advance to the next phase until accuracy >= the
-    # corresponding threshold in phase_accuracy_thresholds.
-    start_round: int = 8                                    # Override: always start here
+    # ── Curriculum ( The "Teacher" ) ────────────────────────────────────
+    # Training starts at 8 rounds. It will NOT advance until accuracy >= 95%.
+    start_round: int = 8
+    
+    # The Ladder: [8 -> 16 -> 32 -> 64]
     curriculum_rounds: List[int] = field(default_factory=lambda: [8, 16, 32, 64])
-    phase_min_steps: List[int] = field(default_factory=lambda: [500, 2000, 5000, 0])
-    phase_accuracy_thresholds: List[float] = field(default_factory=lambda: [0.95, 0.85, 0.75, 0.65])
-    #   phase_accuracy_thresholds[i] = minimum accuracy to leave phase i
-    #   phase_min_steps[i]           = minimum steps before checking accuracy
-    #   Last phase threshold is 1.0 (unreachable) so it runs forever.
+    
+    # The Bar: Accuracy required to graduate from each phase
+    # Phase 0 (8r): Must hit 95%
+    # Phase 1 (16r): Must hit 85%
+    # Phase 2 (32r): Must hit 75%
+    # Phase 3 (64r): Runs forever (Threshold > 1.0)
+    phase_accuracy_thresholds: List[float] = field(default_factory=lambda: [0.95, 0.85, 0.75, 1.1])
+    
+    # The Grind: Minimum steps to force in each phase before checking promotion
+    phase_min_steps: List[int] = field(default_factory=lambda: [1000, 2000, 5000, 0])
