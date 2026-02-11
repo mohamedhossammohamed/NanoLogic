@@ -4,7 +4,7 @@
 
 ### *Neuro-Symbolic SHA-256 Cryptanalysis on Apple Silicon*
 
-**Breaking SHA-256 logic on a MacBook Air M4 using <0.3GB RAM.**
+**Breaking SHA-256 logic on a MacBook Air M4 using < 10 GB RAM.**
 
 [![Status](https://img.shields.io/badge/Status-Active%20Training-brightgreen)]()
 [![License](https://img.shields.io/badge/License-Non--Commercial-red)](#license)
