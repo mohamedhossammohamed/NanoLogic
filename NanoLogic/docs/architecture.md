@@ -17,26 +17,35 @@ SHA-256 is **not semantic** — it's a deterministic state machine. A standard T
 
 ## The Wiring Diagram
 
-Each of the 256 bit positions (8 words × 32 bits) gathers information from exactly **15 neighbors**:
+Each of the 256 bit positions (8 words × 32 bits) gathers information from exactly **25 neighbors**:
 
 ```
 Bit[i] in Word[w] attends to:
 │
 ├── Identity:   Bit[i] itself (1 vector)
 │
-├── Σ₀ Group:   ROTR(2), ROTR(13), ROTR(22) of Bit[i] within Word[w]
-│               → 3 vectors from intra-word rotation
+├── Σ₀ Group:   ROTR(2, 13, 22) of Bit[i] within Word[w]
+│               → 3 vectors (Intra-register dependency)
 │
-├── Σ₁ Group:   ROTR(6), ROTR(11), ROTR(25) of Bit[i] within Word[w]
-│               → 3 vectors from intra-word rotation
+├── Σ₁ Group:   ROTR(6, 11, 25) of Bit[i] within Word[w]
+│               → 3 vectors (Intra-register dependency)
+│
+├── σ₀ Group:   ROTR(7, 18), SHR(3) with MASKING
+│               → 3 vectors (Message Schedule dependency)
+│
+├── σ₁ Group:   ROTR(17, 19), SHR(10) with MASKING
+│               → 3 vectors (Message Schedule dependency)
+│
+├── Carry Group: Preceding 4 bits [i+1, i+2, i+3, i+4]
+│                → 4 vectors (Addition/Propagation dependency)
 │
 └── Vertical:   Bit[i] in Word[0], Word[1], ..., Word[7]
-                → 8 vectors from inter-word (same position, different register)
+                → 8 vectors (Inter-register dependency)
 ```
 
-**Total: 1 + 3 + 3 + 8 = 15 vectors per bit position.**
+**Total: 1 + 3 + 3 + 3 + 3 + 4 + 8 = 25 vectors per bit position.**
 
-This is defined statically in [`wiring.py`](../src/model/wiring.py) via `SHA256Wiring.get_op_indices()`.
+This is defined statically in [`wiring.py`](../src/model/wiring.py) via `SHA256Wiring.get_op_indices()`, which now returns both indices and bit-masks for logical shifts.
 
 ## Architecture Diagram
 
@@ -55,10 +64,12 @@ Input: [B, 256] (binary assignment vector, 0/1 integers)
 │                                                 │
 │  1. Pre-Norm (LayerNorm)                        │
 │  2. Gather neighbors via static wiring indices  │
-│     ├── Σ₀ neighbors [B, 256, 3, D]             │
-│     ├── Σ₁ neighbors [B, 256, 3, D]             │
-│     └── Vertical     [B, 256, 8, D]             │
-│  3. Concatenate: [B, 256, 15·D]                 │
+│     ├── Σ₀ neighbors     [B, 256, 3, D]         │
+│     ├── Σ₁ neighbors     [B, 256, 3, D]         │
+│     ├── σ₀/σ₁ neighbors  [B, 256, 6, D] (Masked)│
+│     ├── Carry neighbors  [B, 256, 4, D]         │
+│     └── Vertical         [B, 256, 8, D]         │
+│  3. Concatenate: [B, 256, 25·D]                 │
 │  4. BitLinear projection → [B, 256, D]          │
 │  5. Residual connection                         │
 │  6. Pre-Norm → MLP (BitLinear 4× expand) → Res  │

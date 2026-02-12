@@ -139,65 +139,133 @@ class SHA256Wiring:
         return bits, W # Return bits and Schedule
 
     @staticmethod
-    def get_op_indices(device='cpu'):
+    def get_op_indices(device='cpu', carry_depth=4):
         """
-        Returns GLOBAL indices [256, k] for specific SHA-256 operations.
+        Returns GLOBAL indices [256, k] and masks [256, k] for specific SHA-256 operations.
         Used by SparseLogicLayer for direct bit gathering.
+        
+        New Logic:
+        - Returns (indices, mask) tuple for each operation type.
+        - indices: Global index of source bit. If masked, value doesn't matter (we use 0 or clamp).
+        - mask: 1.0 if valid, 0.0 if masked (e.g. SHR shifted in zeros).
         """
         # Create global indices 0..255
-        # Bit i is at index i.
-        # Structure: 8 words of 32 bits.
-        # Word w, Bit b -> Index = w*32 + b
-        
-        # 1. Sigma0/1 Rotational Indices (Intra-Word)
-        # For bit `idx` (global), we find its word `w` and local bit `b`.
-        # Then we apply rotation to `b` modulo 32.
-        # Then convert back to global index: w*32 + b_rot
-        
         global_idx = torch.arange(256, device=device)
         word_idx = global_idx // 32
         bit_idx = global_idx % 32
         
         def get_rotated_indices(shifts):
             # shifts: list of ints e.g. [2, 13, 22]
+            # Returns indices [256, k], mask [256, k] (all 1s)
             indices = []
             for s in shifts:
-                # Rotate right by s
-                # (b - s) % 32
+                # Rotate right by s: (b - s) % 32
                 b_rot = (bit_idx - s) % 32
                 global_rot = word_idx * 32 + b_rot
                 indices.append(global_rot)
-            return torch.stack(indices, dim=1) # [256, len(shifts)]
+            
+            idx_tensor = torch.stack(indices, dim=1)
+            mask_tensor = torch.ones_like(idx_tensor, dtype=torch.float32)
+            return idx_tensor, mask_tensor
 
+        def get_shifted_indices(shifts, is_generated_shift=False):
+            # shifts must correspond to operations. 
+            # If is_generated_shift is True (for sigma_w), some ops are ROTR, some SHR.
+            # We handle mixed operations by passing a list of (shift_amount, type='ROTR'|'SHR') tuples?
+            # Or just infer based on standard SHA-256 ops?
+            # Simpler: We know exactly what ops are required.
+            pass
+
+        # Helper for Sigma0/1 (Pure ROTR)
         # Sigma0: ROTR 2, 13, 22
-        sigma0_indices = get_rotated_indices([2, 13, 22])
+        sigma0_idx, sigma0_mask = get_rotated_indices([2, 13, 22])
         
         # Sigma1: ROTR 6, 11, 25
-        sigma1_indices = get_rotated_indices([6, 11, 25])
+        sigma1_idx, sigma1_mask = get_rotated_indices([6, 11, 25])
         
+        # Use a more flexible helper for mixed operations (ROTR + SHR)
+        def get_mixed_indices(ops):
+            # ops: list of (shift, type) e.g. [(7, 'ROTR'), (18, 'ROTR'), (3, 'SHR')]
+            indices = []
+            masks = []
+            
+            for s, op_type in ops:
+                if op_type == 'ROTR':
+                    b_target = (bit_idx - s) % 32
+                    mask = torch.ones(256, device=device)
+                elif op_type == 'SHR':
+                    # SHR n: Target bit b comes from b - n.
+                    # If b - n < 0, it's a zero (masked).
+                    # NOTE: bit_idx 0 is MSB in our convention?
+                    # Wait, let's check standard. 
+                    # If 0 is MSB: 1000.. >> 1 -> 0100..
+                    # Bit 0 becomes 0. Bit 1 has value of old Bit 0.
+                    # So Target b comes from Source b - s (if we index 0..31)
+                    # Example: Target 1 comes from Source 0.
+                    # If b - s < 0, valid bit.
+                    # Wait. 
+                    # MSB=0. LSB=31.
+                    # x >> 3.
+                    # Bit 0 (MSB) gets 0.
+                    # Bit 1 gets 0.
+                    # Bit 2 gets 0.
+                    # Bit 3 gets Bit 0.
+                    # So Target b comes from Source b - s.
+                    # If b - s < 0, it wraps? No, it's 0.
+                    b_target = bit_idx - s
+                    # Mask is 1 if b_target >= 0, else 0
+                    mask = (b_target >= 0).float()
+                    # Clamp index to 0 to avoid -1 indexing (mask will kill it anyway)
+                    b_target = torch.clamp(b_target, min=0)
+                
+                global_target = word_idx * 32 + b_target
+                indices.append(global_target)
+                masks.append(mask)
+            
+            return torch.stack(indices, dim=1), torch.stack(masks, dim=1)
+
         # Sigma0_w (Message Schedule): ROTR 7, 18, SHR 3
-        # Use circular for SHR to keep dimensionality, model can learn to ignore wrapped bit if needed
-        # or we implement masking. For now, just rotation.
-        sigma0_w_indices = get_rotated_indices([7, 18, 3])
+        sigma0_w_idx, sigma0_w_mask = get_mixed_indices([(7, 'ROTR'), (18, 'ROTR'), (3, 'SHR')])
         
         # Sigma1_w: ROTR 17, 19, SHR 10
-        sigma1_w_indices = get_rotated_indices([17, 19, 10])
+        sigma1_w_idx, sigma1_w_mask = get_mixed_indices([(17, 'ROTR'), (19, 'ROTR'), (10, 'SHR')])
         
-        # 2. Vertical Indices (Inter-Word)
-        # For a bit `b` in word `w`, we want to see bit `b` in all other words.
-        # Total 8 words. We want 8 neighbors (including self, or excluding self).
-        # Let's return all 8 versions of this bit position.
-        # shape [256, 8]
+        # 2. Vertical Indices (Inter-Word) - All 1s mask
         vertical_indices = []
         for w in range(8):
-            # The index of bit `bit_idx` in word `w`
             v_idx = w * 32 + bit_idx
             vertical_indices.append(v_idx)
+        vertical_idx = torch.stack(vertical_indices, dim=1)
+        vertical_mask = torch.ones_like(vertical_idx, dtype=torch.float32)
+
+
+        # 3. Carry Propagation Indices (Ripple Carry)
+        # Models addition dependency: i depends on i+1 (LSB side)
+        # Default depth: 4 bits lookahead
+        carry_indices = []
+        carry_masks = []
+        
+        for k in range(1, carry_depth + 1):
+            # Target i depends on Source i + k (towards LSB)
+            # If i + k > 31, no incoming carry from there (it's outside word)
+            b_src = bit_idx + k
+            mask = (b_src < 32).float()
             
-        vertical_indices = torch.stack(vertical_indices, dim=1) # [256, 8]
+            # Clamp to 31 for safety
+            b_src = torch.clamp(b_src, max=31)
+            
+            global_src = word_idx * 32 + b_src
+            carry_indices.append(global_src)
+            carry_masks.append(mask)
+            
+        carry_idx = torch.stack(carry_indices, dim=1)
+        carry_mask = torch.stack(carry_masks, dim=1)
 
         return {
-            'sigma0': sigma0_indices,
-            'sigma1': sigma1_indices,
-            'vertical': vertical_indices
+            'sigma0': (sigma0_idx, sigma0_mask),
+            'sigma1': (sigma1_idx, sigma1_mask),
+            'sigma0_w': (sigma0_w_idx, sigma0_w_mask), # Explicitly returning w indices
+            'sigma1_w': (sigma1_w_idx, sigma1_w_mask),
+            'vertical': (vertical_idx, vertical_mask),
+            'carry': (carry_idx, carry_mask)
         }

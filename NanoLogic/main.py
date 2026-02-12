@@ -14,8 +14,15 @@ from config import Config
 from src.model import SparseLogicTransformer, Pathfinder, SHA256Wiring
 from src.optim import LionGaLore
 from src.train import StateMatchingLoss, CurriculumScheduler, infinite_trace_stream
+from src.train.pipeline import SharedMemoryLoader
 from src.solver import SolverBridge
 from src.utils.monitor import MemoryGuard
+
+# ── IMPORTS FOR MIXED PRECISION ──────────────────────────────────────────────
+try:
+    from torch.amp import autocast, GradScaler
+except ImportError:
+    from torch.cuda.amp import autocast, GradScaler
 
 # ── Directories ──────────────────────────────────────────────────────────────
 CHECKPOINT_DIR = os.path.join(os.path.dirname(__file__), "checkpoints")
@@ -37,6 +44,26 @@ def main():
     config = Config()
     device = "mps" if torch.backends.mps.is_available() else "cpu"
     print(f"✅ Device: {device}")
+    
+    # Enable mixed precision scaler
+    scaler = None
+    scaler_type = "Unknown"
+    
+    try:
+        # Try new torch.amp API first
+        from torch.amp import GradScaler as AmpGradScaler
+        if device == 'mps':
+            scaler = AmpGradScaler('mps')
+            scaler_type = "MPS Native"
+        else:
+            scaler = AmpGradScaler()
+            scaler_type = "Generic"
+    except (ImportError, TypeError):
+        # Fallback to legacy behavior
+        scaler = GradScaler()
+        scaler_type = "Legacy/CUDA (Warning Expected)"
+        
+    print(f"⚡ Mixed Precision (FP16): Enabled ({scaler_type})")
 
     # 2. Model
     model = SparseLogicTransformer(config).to(device)
@@ -126,24 +153,34 @@ def main():
     running_acc = 0.0
     optimizer.zero_grad()
 
+    # ── Initialize Shared Memory Loader ──────────────────────────────────
+    current_rounds = scheduler.get_current_rounds()
+    loader = SharedMemoryLoader(
+        batch_size=config.batch_size, 
+        rounds=current_rounds, 
+        num_workers=4 # Use 4 parallel producers for M4 efficiency
+    )
+
     try:
         while True:
             rounds = scheduler.get_current_rounds()
 
-            # ── Generate Data (lazy, one micro-batch) ────────────────────
-            data_gen = infinite_trace_stream(config.batch_size, rounds, "cpu")
-            inputs_cpu, targets_cpu = next(data_gen)
+            # ── Generate Data (Shared Memory) ────────────────────────────
+            # Blocks until data is available from shared memory
+            inputs, targets = loader.get_batch(device=device)
+            if inputs is None: # Shutdown signal
+                break
 
-            inputs = inputs_cpu.to(device)
-            targets = targets_cpu.to(device)
+            # ── Forward (Mixed Precision) ────────────────────────────────
+            # Autocast context for FP16
+            with autocast(device_type=device, dtype=torch.float16):
+                logits = model(inputs)
+                loss = criterion(logits, targets)
+                # Scale loss for gradient accumulation
+                scaled_loss = loss / grad_accum
 
-            # ── Forward ──────────────────────────────────────────────────
-            logits = model(inputs)
-            loss = criterion(logits, targets)
-
-            # Scale loss for gradient accumulation
-            scaled_loss = loss / grad_accum
-            scaled_loss.backward()
+            # Backward with Scaler
+            scaler.scale(scaled_loss).backward()
 
             # Track metrics (unscaled)
             loss_val = loss.item()
@@ -157,12 +194,26 @@ def main():
                 new_rounds = scheduler.get_current_rounds()
                 new_threshold = scheduler.get_accuracy_threshold()
                 print(f"\n🔄 Phase Shift! Accuracy gate passed → now {new_rounds} rounds (next gate: {new_threshold:.0%})")
+                
+                # Restart Loader for new curriculum phase
+                print("♻️  Restarting Data Loader for new curriculum phase...")
+                loader.shutdown()
+                loader = SharedMemoryLoader(
+                    batch_size=config.batch_size, 
+                    rounds=new_rounds, 
+                    num_workers=4
+                )
 
             # ── Optimizer Step (every grad_accum micro-batches) ──────────
             if scheduler.total_steps % grad_accum == 0:
-                # Gradient clipping for safety
+                # Gradient clipping for safety (unscale first)
+                scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-                optimizer.step()
+                
+                # Scaler Step
+                scaler.step(optimizer)
+                scaler.update()
+                
                 optimizer.zero_grad()
 
             # ── Cleanup ──────────────────────────────────────────────────
@@ -178,16 +229,22 @@ def main():
             memory_guard.check()
 
             # ── Logging (every 10 steps) ─────────────────────────────────
+            # ── Logging (every 10 steps) ─────────────────────────────────
             if scheduler.total_steps % 10 == 0:
                 avg_loss = running_loss / 10
                 avg_acc = running_acc / 10
-                ram_gb = psutil.Process(os.getpid()).memory_info().rss / (1024 ** 3)
+                
+                # Precise Memory Tracking
+                cpu_gb, mps_gb = MemoryGuard.get_total_memory_usage()
+                total_app_gb = cpu_gb + mps_gb
+                
                 threshold = scheduler.get_accuracy_threshold()
 
-                print(f"{scheduler.total_steps:>8} | {avg_loss:>10.4f} | {avg_acc:>9.2%} | {threshold:>9.0%} | {ram_gb:>9.2f} | {scheduler.current_phase:>6} | {rounds:>6}")
+                # Print breakdown: Total (CPU | MPS)
+                print(f"{scheduler.total_steps:>8} | {avg_loss:>10.4f} | {avg_acc:>9.2%} | {threshold:>9.0%} | {total_app_gb:>9.2f} ({cpu_gb:.1f}+{mps_gb:.1f}) | {scheduler.current_phase:>6} | {rounds:>6}")
 
                 # CSV log (append)
-                log_file.write(f"{scheduler.total_steps},{avg_loss:.6f},{avg_acc:.6f},{threshold:.2f},{ram_gb:.2f},{scheduler.current_phase},{rounds}\n")
+                log_file.write(f"{scheduler.total_steps},{avg_loss:.6f},{avg_acc:.6f},{threshold:.2f},{total_app_gb:.2f},{scheduler.current_phase},{rounds}\n")
                 log_file.flush()
 
                 running_loss = 0.0
@@ -202,6 +259,7 @@ def main():
                     'optimizer_state_dict': optimizer.state_dict(),
                     'scheduler_state_dict': scheduler.state_dict(),
                     'loss': loss_val,
+                    'scaler_state_dict': scaler.state_dict(), # [NEW] Save scaler state
                 }, ckpt_path)
                 print(f"  💾 Checkpoint saved: {ckpt_path}")
 
@@ -215,11 +273,14 @@ def main():
         'model_state_dict': model.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
         'scheduler_state_dict': scheduler.state_dict(),
+        'scaler_state_dict': scaler.state_dict(), # [NEW] Save scaler state
     }, final_path)
     print(f"💾 Final checkpoint saved: {final_path}")
 
     log_file.close()
     bridge.close()
+    if 'loader' in locals():
+        loader.shutdown()
     print(f"\n✅ Training Complete. {scheduler.total_steps} steps executed.")
     print(f"📊 Logs: {log_path}")
 

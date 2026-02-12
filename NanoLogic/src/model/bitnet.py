@@ -15,6 +15,11 @@ class BitLinearFunction(torch.autograd.Function):
         input_scale = 127.0 / (input.abs().max(dim=-1, keepdim=True).values + 1e-5)
         input_quant = (input * input_scale).round().clamp(-128, 127) / input_scale
         
+        # Ensure dtypes match for mixed precision (FP16 input, FP32 weight)
+        if input.dtype != weight.dtype:
+            w_quant = w_quant.to(dtype=input.dtype)
+            gamma = gamma.to(dtype=input.dtype)
+        
         ctx.save_for_backward(input, w_quant, gamma)
         
         output = F.linear(input_quant, w_quant * gamma, bias)
@@ -24,6 +29,10 @@ class BitLinearFunction(torch.autograd.Function):
     def backward(ctx, grad_output):
         input, w_quant, gamma = ctx.saved_tensors
         grad_input = grad_weight = grad_bias = None
+
+        # Robust casting for mixed precision (MPS/FP16)
+        if grad_output.dtype != w_quant.dtype:
+            grad_output = grad_output.to(w_quant.dtype)
 
         if ctx.needs_input_grad[0]:
             # Scale grad_input by gamma to match forward pass scale

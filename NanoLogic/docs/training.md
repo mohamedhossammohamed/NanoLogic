@@ -85,23 +85,22 @@ The model predicts the **next SHA-256 state** given the current state. Each of t
 
 **Random baseline**: BCE loss ≈ 0.693, Accuracy ≈ 50%.
 
-## Data Generation
+## Data Generation (Shared Memory)
 
-Data is generated **lazily** via `infinite_trace_stream()`:
+Data is streamed via `SharedMemoryLoader` to eliminate disk I/O bottlenecks:
 
+- **Ring Buffer**: A pool of pre-allocated POSIX Shared Memory blocks.
+- **CPU Producers**: Parallel worker processes generate SHA-256 traces using `SHA256Wiring.generate_trace`.
+- **Zero-Copy**: Tensors are mapped directly from shared memory onto the main training process.
+- **Auto-Sync**: Uses `multiprocessing.Queue` to manage empty/full buffer handovers.
+
+```python
+# Initialization in main.py:
+loader = SharedMemoryLoader(batch_size=64, rounds=16, num_workers=4)
+
+# Consumption:
+inputs, targets = loader.get_batch(device='mps')
 ```
-SHA256Wiring.generate_trace(batch_size, rounds+1)
-  → states: [B, rounds+1, 256]
-  → inputs:  states[:, :-1, :]   (State at time t)
-  → targets: states[:, 1:, :]    (State at time t+1)
-  → flatten to [B*rounds, 256]
-```
-
-Key properties:
-- **Zero storage**: No dataset on disk, generated on-the-fly
-- **CPU generation**: Data created on CPU, transferred to MPS per step
-- **Explicit cleanup**: `del states, inputs, targets` after yield
-
 ## Lion Optimizer with GaLore
 
 ### Lion (Evolved Sign Momentum)
@@ -200,6 +199,14 @@ step,loss,accuracy,threshold,ram_gb,phase,rounds
 
 The log is **never overwritten** — every restart appends to the same file.
 
+## Mixed Precision (FP16)
+
+The framework uses **FP16 Mixed Precision** with `torch.amp.GradScaler` optimized for Apple Silicon (MPS):
+
+- **Autocast**: Forward pass runs in `float16` to double throughput and halve activation memory.
+- **GradScaler**: Prevents gradient underflow by scaling loss before backward.
+- **BitNet STE**: Gradients are unscaled before clipping to maintain stability in the ternary logic space.
+
 ## Checkpoint Format
 
 ```python
@@ -207,13 +214,8 @@ The log is **never overwritten** — every restart appends to the same file.
     'step': int,                    # Total training steps completed
     'model_state_dict': dict,       # SparseLogicTransformer weights
     'optimizer_state_dict': dict,   # Lion momentum buffers
-    'scheduler_state_dict': {       # Curriculum state
-        'current_phase': int,
-        'current_step': int,
-        'total_steps': int,
-        'running_acc_sum': float,
-        'running_acc_count': int,
-    },
+    'scheduler_state_dict': dict,   # Curriculum state
+    'scaler_state_dict': dict,      # GradScaler state (for consistency)
     'loss': float,                  # Loss at checkpoint time
 }
 ```

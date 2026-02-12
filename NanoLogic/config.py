@@ -6,8 +6,8 @@ class Config:
     # ── Model Architecture ( The "Heavy Lifter" ) ───────────────────────
     # Strategy: Width > Depth. A wider bus (512) allows complex XOR/ROT 
     # logic to happen in a single step, while fewer layers (12) saves RAM.
-    dim: int = 1024              # WAS: 256. Doubled for logic capacity.
-    n_layers: int = 12          # WAS: 24. Halved to fit in RAM with dim=512.
+    dim: int = 512              # WAS: 256. Doubled for logic capacity.
+    n_layers: int = 24          # WAS: 24. Halved to fit in RAM with dim=512.
     n_heads: int = 16
                # Parallel logic paths (Vertical Wiring).
     vocab_size: int = 2         # Binary (0, 1) input. Output is ternary weights.
@@ -22,7 +22,7 @@ class Config:
     # ── Memory Guard ( M4 Optimization ) ────────────────────────────────
     # Effective Batch Size = batch_size * grad_accum_steps = 64
     batch_size: int = 2         # Kept minimal to prevent activation explosion.
-    grad_accum_steps: int = 32  # Accumulate 32 micro-batches before stepping.
+    grad_accum_steps: int = 64  # Accumulate 32 micro-batches before stepping.
     num_workers: int = 0        # 0 = Main Thread (Crucial for MacOS/MPS stability).
     pin_memory: bool = False    # Disabled to save physical RAM.
 
@@ -46,7 +46,7 @@ class Config:
     # Phase 1 (16r): Must hit 85%
     # Phase 2 (32r): Must hit 75%
     # Phase 3 (64r): Runs forever (Threshold > 1.0)
-    phase_accuracy_thresholds: List[float] = field(default_factory=lambda: [0.95, 0.85, 0.75, 1.1])
+    phase_accuracy_thresholds: List[float] = field(default_factory=lambda: [0.80, 0.70, 0.60, 0.55])
     
     # The Grind: Minimum steps to force in each phase before checking promotion
     phase_min_steps: List[int] = field(default_factory=lambda: [1000, 2000, 5000, 0])

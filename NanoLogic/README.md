@@ -37,17 +37,18 @@ The model currently achieves **62%+ bit-prediction accuracy** on SHA-256 interna
 
 Standard Transformers attend to *everything*. But SHA-256 is **sparse** — each bit only depends on a handful of neighbors defined by the `Σ₀`, `Σ₁`, `Maj`, and `Ch` functions.
 
-We hard-code the attention mask to mirror the **exact wiring diagram** of SHA-256:
+We hard-code the attention mask to mirror the **exact wiring diagram** of SHA-256, now including **SHR masking** and **carry-bit dependencies**:
 
 ```
 Bit[i] attends to:
   → Itself (identity)
-  → ROTR(2,13,22) neighbors  (Σ₀ wiring)
-  → ROTR(6,11,25) neighbors  (Σ₁ wiring)
-  → Same bit across all 8 words (Vertical/Inter-word wiring)
+  → ROTR(2,13,22) & ROTR(6,11,25)  (Σ₀, Σ₁ wiring)
+  → ROTR(7,18) & SHR(3)            (σ₀, σ₁ wiring with true SHR masking)
+  → Preceding 4 bits               (Carry-propagation wiring)
+  → Same bit across all 8 words    (Vertical/Inter-word wiring)
 ```
 
-**Result:** Instead of `256 × 256 = 65,536` attention weights per layer, we use `256 × 15 = 3,840`. That's a **17× reduction** — enabling 24 layers on a laptop.
+**Result:** Each bit gathers exactly **25 vectors**. Instead of `256 × 256 = 65,536` attention weights per layer, we use `256 × 25 = 6,400`. That's a **10× reduction** — enabling deep logic learning at 24 layers.
 
 ### 2. BitNet b1.58 — Ternary Weights {-1, 0, 1}
 
@@ -110,19 +111,19 @@ NanoLogic/
 │   ├── model/
 │   │   ├── sparse_logic.py     # Sparse Logic Transformer (gradient checkpointing)
 │   │   ├── bitnet.py           # BitNet b1.58 quantization layer
-│   │   ├── wiring.py           # SHA-256 static wiring + trace generator
+│   │   ├── wiring.py           # SHA-256 static wiring (fixed SHR masking + Carry)
 │   │   └── pathfinder.py       # ResNet-1D distinguisher
 │   ├── optim/
 │   │   └── lion_galore.py      # Lion optimizer with GaLore projection
 │   ├── train/
-│   │   ├── synthetic.py        # Lazy trace generator (zero-storage)
+│   │   ├── pipeline.py         # Shared Memory Loader (zero-disk I/O)
 │   │   ├── curriculum.py       # 3-phase curriculum scheduler
 │   │   └── loss.py             # BCE + Hamming distance loss
 │   ├── solver/
 │   │   ├── bridge.py           # Shared memory bridge (zero-copy)
 │   │   └── cnf_utils.py        # SAT encoding utilities
 │   └── utils/
-│       └── monitor.py          # MemoryGuard (10GB ceiling)
+│       └── monitor.py          # MemoryGuard (14GB ceiling)
 ├── tools/
 │   └── neuro_cli.py            # Interactive demo CLI (rich)
 ├── checkpoints/                # Auto-saved every 500 steps
