@@ -92,12 +92,13 @@ class NeuroCDCL:
         """Compute actual SHA-256 hash of a message for verification."""
         return hashlib.sha256(message_bytes).hexdigest()
 
-    def search(self, target_hash_hex):
+    def search(self, target_hash_hex, progress_callback=None):
         """
         Run the full NeuroCDCL search loop.
         
         Args:
             target_hash_hex: 64-character hex string (target SHA-256 hash).
+            progress_callback: Optional function(step, bits_fixed, threshold).
             
         Returns:
             dict with:
@@ -132,6 +133,9 @@ class NeuroCDCL:
                 timeout_ms=self.z3_timeout_ms,
             )
 
+            if progress_callback:
+                progress_callback(iteration, 0 if iteration==0 else bits_fixed, current_threshold)
+
             # Attempt solve with current neural hints
             if iteration == 0:
                 # First iteration: pure Z3, no hints
@@ -139,8 +143,8 @@ class NeuroCDCL:
             else:
                 # Subsequent iterations: inject neural guidance
                 result = solver.solve_partial(
-                    target_hash_hex,
-                    neural_hints,
+                    target_hash_hex, 
+                    neural_hints, 
                     confidence_threshold=current_threshold,
                 )
 

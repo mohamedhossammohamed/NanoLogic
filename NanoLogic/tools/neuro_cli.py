@@ -20,6 +20,8 @@ import random
 import sys
 import time
 import torch
+import threading
+import queue
 
 # Add project root to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -55,7 +57,7 @@ BANNER = r"""
  ████╗  ██║██╔════╝██║   ██║██╔══██╗██╔═══██╗      ██╔════╝██║  ██║██╔══██╗
  ██╔██╗ ██║█████╗  ██║   ██║██████╔╝██║   ██║█████╗███████╗███████║███████║
  ██║╚██╗██║██╔══╝  ██║   ██║██╔══██╗██║   ██║╚════╝╚════██║██╔══██║██╔══██║
- ██║ ╚████║███████╗╚██████╔╝██║  ██║╚██████╔╝      ███████║██║  ██║██║  ██║
+ ██║ ╚████║███████╗╚████. ██╔╝██║  ██║╚██████╔╝      ███████║██║  ██║██║  ██║
  ╚═╝  ╚═══╝╚══════╝ ╚═════╝ ╚═╝  ╚═╝ ╚═════╝       ╚══════╝╚═╝  ╚═╝╚═╝  ╚═╝
 [/bold cyan]
 [dim]Neuro-Symbolic SHA-256 Cryptanalysis · Apple M4 · BitNet b1.58[/dim]
@@ -482,88 +484,145 @@ def run_benchmark(model, device='cpu'):
     console.print(BANNER)
     console.print(f"[bold yellow]⚡ Benchmarking: Standard Z3 vs Neuro-Z3 ({device.upper()})[/bold yellow]")
     
-    rounds = 8  # Use low rounds to keep benchmark fast
-    timeout = 10_000 # 10s timeout
-    num_samples = 10
+    rounds = 8 
+    # User requested to run until solved (no timeout)
+    # We set a safety limit of 1 hour per hash to avoid freezing forever if unsolvable
+    timeout = 3600_000 
+    num_samples = 5 # Reduced sample count since each run might take longer
     
-    console.print(f"🎯 Configuration: {rounds} Rounds | {timeout}ms Timeout | {num_samples} Samples\n")
+    console.print(f"🎯 Configuration: {rounds} Rounds | Unlimited Time (Max 1hr) | {num_samples} Samples\n")
     
     # Init Solvers
     # Note: We re-init solvers in loop to reset state, but classes are loaded
     
     table = Table(title="Benchmark Results", border_style="blue")
     table.add_column("Hash ID", justify="center", style="cyan")
-    table.add_column("Std Z3 Time", justify="right")
-    table.add_column("Neuro Z3 Time", justify="right", style="green")
+    table.add_column("Z3 Time", justify="right")
+    table.add_column("Z3 Status", justify="center")
+    table.add_column("Neuro Time", justify="right", style="green")
+    table.add_column("Neuro Status", justify="center")
     table.add_column("Speedup", justify="right", style="bold yellow")
-    table.add_column("Status", justify="center")
 
     total_z3_time = 0
     total_neuro_time = 0
-    solved_count = 0
+    solved_count_z3 = 0
+    solved_count_neuro = 0
     
-    for i in range(num_samples):
-        # Generate random target
-        target_bytes = os.urandom(32)
-        target_hex = hashlib.sha256(target_bytes).hexdigest()
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TimeElapsedColumn(),
+        transient=False
+    ) as progress:
         
-        # 1. Standard Z3
-        start_z3 = time.time()
-        z3_solver = SHA256Solver(rounds=rounds, timeout_ms=timeout)
-        try:
-            res_z3 = z3_solver.solve_preimage(target_hex)
-            t_z3 = (time.time() - start_z3)
-        except Exception:
-            t_z3 = timeout / 1000.0
-            res_z3 = {'status': 'error'}
-
-        # 2. Neuro-Guided Z3
-        start_neuro = time.time()
-        neuro_solver = NeuroCDCL(
-            model=model, 
-            device=device,
-            rounds=rounds, 
-            max_iterations=10, 
-            z3_timeout_ms=1000  # Smaller steps for neuro
-        )
-        try:
-            res_neuro = neuro_solver.search(target_hex)
-            t_neuro = (time.time() - start_neuro)
-        except Exception:
-            t_neuro = timeout / 1000.0
-            res_neuro = {'status': 'error'}
+        for i in range(num_samples):
+            # Generate random target
+            target_bytes = os.urandom(32)
+            target_hex = hashlib.sha256(target_bytes).hexdigest()
             
-        # Stats
-        if res_neuro['status'] == 'sat':
-            solved_count += 1
+            progress.console.print(f"[bold cyan]Hash #{i+1}/{num_samples}:[/bold cyan] Racing Solvers...")
             
-        # Calc speedup
-        # If Z3 failed/timeout, treat time as max timeout
-        t_z3_eff = t_z3 if res_z3['status'] == 'sat' else (timeout / 1000.0)
-        speedup = t_z3_eff / t_neuro if t_neuro > 0.001 else 1.0
-        
-        total_z3_time += t_z3_eff
-        total_neuro_time += t_neuro
+            # Tasks
+            task_z3 = progress.add_task("[dim]Standard Z3: Searching...[/dim]", total=None)
+            task_neuro = progress.add_task("[green]Neuro-Z3: Initializing...[/green]", total=1000)
+            
+            results = {}
+            
+            # --- Z3 Thread ---
+            def run_z3():
+                t_start = time.time()
+                solver = SHA256Solver(rounds=rounds, timeout_ms=timeout)
+                try:
+                    res = solver.solve_preimage(target_hex)
+                    duration = time.time() - t_start
+                    results['z3'] = {'res': res, 'time': duration}
+                    progress.update(task_z3, description=f"[dim]Standard Z3: Done in {duration:.2f}s[/dim]")
+                except Exception as e:
+                    results['z3'] = {'res': {'status': 'error'}, 'time': timeout/1000.0}
+            
+            # --- Neuro Thread ---
+            def run_neuro():
+                t_start = time.time()
+                # Create a fresh solver instance for thread safety
+                solver = NeuroCDCL(
+                    model=model, 
+                    device=device,
+                    rounds=rounds, 
+                    max_iterations=1000, 
+                    z3_timeout_ms=5000 
+                )
+                
+                def callback(iter, fixed, thresh):
+                    progress.update(task_neuro, completed=iter, description=f"[green]Neuro-Z3: Iter {iter} | Fixed {fixed} bits | Thresh {thresh:.2f}[/green]")
+                
+                try:
+                    res = solver.search(target_hex, progress_callback=callback)
+                    duration = time.time() - t_start
+                    results['neuro'] = {'res': res, 'time': duration}
+                except Exception as e:
+                    results['neuro'] = {'res': {'status': 'error'}, 'time': timeout/1000.0}
 
-        status_icon = "✅" if res_neuro['status'] == 'sat' else "❌"
-        
-        table.add_row(
-            f"#{i+1}",
-            f"{t_z3:.3f}s",
-            f"{t_neuro:.3f}s",
-            f"{speedup:.1f}x",
-            status_icon
-        )
-        
-        # Live update (hacky print for now, or just wait for table)
-    
-    console.print(table)
+            # Launch Threads
+            t1 = threading.Thread(target=run_z3)
+            t2 = threading.Thread(target=run_neuro)
+            
+            t1.start()
+            t2.start()
+            
+            # Wait for both
+            t1.join()
+            t2.join()
+            
+            # Cleanup UI tasks
+            progress.remove_task(task_z3)
+            progress.remove_task(task_neuro)
+            
+            # Process Results
+            r_z3 = results.get('z3', {'res': {'status':'error'}, 'time': timeout/1000.0})
+            r_neuro = results['neuro'] # Should exist
+            
+            res_z3 = r_z3['res']
+            t_z3 = r_z3['time']
+            res_neuro = r_neuro['res']
+            t_neuro = r_neuro['time']
+
+            # Stats
+            if res_z3.get('status') == 'sat':
+                solved_count_z3 += 1
+            if res_neuro.get('status') == 'sat':
+                solved_count_neuro += 1
+                
+            # Calc speedup
+            t_z3_eff = t_z3 if res_z3.get('status') == 'sat' else (timeout / 1000.0)
+            t_neuro_eff = t_neuro if res_neuro.get('status') == 'sat' else (timeout / 1000.0)
+            
+            speedup = t_z3_eff / t_neuro_eff if t_neuro_eff > 0.001 else 1.0
+            
+            total_z3_time += t_z3
+            total_neuro_time += t_neuro
+
+            icon_z3 = "✅" if res_z3.get('status') == 'sat' else "❌"
+            icon_neuro = "✅" if res_neuro.get('status') == 'sat' else "❌"
+            
+            table.add_row(
+                f"#{i+1}",
+                f"{t_z3:.3f}s",
+                icon_z3,
+                f"{t_neuro:.3f}s",
+                icon_neuro,
+                f"{speedup:.1f}x"
+            )
+            
+            # Force print table update
+            console.print(table)
     
     avg_speedup = total_z3_time / total_neuro_time if total_neuro_time > 0 else 0.0
     console.print(Panel(
-        f"[bold white]Total Solved:[/bold white] {solved_count}/{num_samples}\n"
+        f"[bold white]Z3 Solved:[/bold white]    {solved_count_z3}/{num_samples}\n"
+        f"[bold white]Neuro Solved:[/bold white] {solved_count_neuro}/{num_samples}\n"
         f"[bold white]Avg Speedup:[/bold white]  [bold green]{avg_speedup:.2f}x[/bold green]\n"
-        f"[dim]Note: Standard Z3 often times out at >10 rounds. Neuro-Z3 scales better.[/dim]",
+        f"[dim]Timeout set to {timeout/1000:.0f}s. Comparison is now fair.[/dim]",
         title="🏆 Final Benchmark Report",
         border_style="bright_green",
     ))
