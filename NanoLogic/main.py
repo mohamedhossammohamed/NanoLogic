@@ -262,6 +262,20 @@ def main():
                     'scaler_state_dict': scaler.state_dict(), # [NEW] Save scaler state
                 }, ckpt_path)
                 print(f"  💾 Checkpoint saved: {ckpt_path}")
+                
+                # ── Checkpoint Cleanup (Keep Last 2) ──
+                try:
+                    all_ckpts = [f for f in os.listdir(CHECKPOINT_DIR) if f.startswith("neuro_sha_step_") and f.endswith(".pt")]
+                    # Sort by step number
+                    all_ckpts.sort(key=lambda x: int(x.split('_')[-1].split('.')[0]))
+                    
+                    if len(all_ckpts) > 2:
+                        to_delete = all_ckpts[:-2]
+                        for f in to_delete:
+                            os.remove(os.path.join(CHECKPOINT_DIR, f))
+                            print(f"  🗑️  Pruned old checkpoint: {f}")
+                except Exception as e:
+                    print(f"  ⚠️  Checkpoint cleanup failed: {e}")
 
     except KeyboardInterrupt:
         print("\n🛑 Training Interrupted by User")
