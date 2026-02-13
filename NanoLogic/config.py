@@ -49,4 +49,4 @@ class Config:
     phase_accuracy_thresholds: List[float] = field(default_factory=lambda: [0.80, 0.70, 0.60, 0.55])
     
     # The Grind: Minimum steps to force in each phase before checking promotion
-    phase_min_steps: List[int] = field(default_factory=lambda: [1000, 2000, 5000, 0])
+    phase_min_steps: List[int] = field(default_factory=lambda: [1000, 2000, 5000, 10000])
