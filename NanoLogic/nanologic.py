@@ -140,6 +140,12 @@ class NanoLogicApp(App):
                 self.log_view.write("[dim]System already fully unlocked.[/]")
         
         # 2. Tool Router
+        elif cmd == "crack":
+            # Launch interactive screen instead of static output
+            from src.tui.screens import CrackScreen
+            target = args[0] if args else ""
+            self.push_screen(CrackScreen(target_hash=target))
+            
         elif cmd in self.tools:
             # Use smart execution engine
             result = execution.execute_tool(self.tools[cmd], args)

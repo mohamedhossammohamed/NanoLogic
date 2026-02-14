@@ -13,16 +13,16 @@ The model learns SHA-256 logic progressively, with **accuracy-gated promotion**:
 
 | Phase | Rounds | Min Steps | Accuracy Gate | Goal |
 |:---:|:---:|:---:|:---:|---|
-| 0 | 8 | 500 | ≥ 95% | Learn basic boolean gate patterns |
-| 1 | 16 | 2,000 | ≥ 95% | Local Σ₀/Σ₁ rotational logic |
-| 2 | 32 | 5,000 | ≥ 95% | Extend to longer dependency chains |
+| 0 | 8 | 1,000 | ≥ 80% | Learn basic boolean gate patterns |
+| 1 | 16 | 2,000 | ≥ 70% | Local Σ₀/Σ₁ rotational logic |
+| 2 | 32 | 5,000 | ≥ 60% | Extend to longer dependency chains |
 | 3 | 64 | ∞ | — | Full SHA-256 (runs forever) |
 
 ### Promotion Conditions
 
 Phase promotion requires **BOTH**:
 1. ✅ Minimum steps completed in the current phase
-2. ✅ Running average accuracy ≥ phase threshold (default 95%)
+2. ✅ Running average accuracy ≥ phase threshold (e.g., 80% for phase 0)
 
 ```python
 # Promotion check (every step):
@@ -30,7 +30,7 @@ if current_step >= phase_min_steps[phase] and running_accuracy >= phase_threshol
     promote_to_next_phase()
 ```
 
-If the model hasn't reached 95% accuracy, it **stays** in the current phase indefinitely — no wasted compute on harder rounds the model can't handle yet.
+If the model hasn't reached the required accuracy, it **stays** in the current phase indefinitely — no wasted compute on harder rounds the model can't handle yet.
 
 ### Configuration (config.py)
 
@@ -44,10 +44,10 @@ class Config:
     
     # Phase schedule
     curriculum_rounds: List[int] = [8, 16, 32, 64]
-    phase_min_steps: List[int] = [500, 2000, 5000, 0]
+    phase_min_steps: List[int] = [1000, 2000, 5000, 0]
     
-    # Per-phase accuracy gates (last is 1.0 = unreachable, runs forever)
-    phase_accuracy_thresholds: List[float] = [0.95, 0.95, 0.95, 1.0]
+    # Per-phase accuracy gates (last is 0.55 = realistic goal for 64 rounds)
+    phase_accuracy_thresholds: List[float] = [0.80, 0.70, 0.60, 0.55]
 ```
 
 To start training at 16 rounds instead of 8:

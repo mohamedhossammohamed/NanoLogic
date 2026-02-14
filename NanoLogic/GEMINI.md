@@ -52,7 +52,7 @@ Instead of attempting a direct inversion of SHA-256, NanoLogic uses a **neural-g
     ```bash
     python3 main.py
     ```
-    Training automatically resumes from `checkpoints/`. It follows a curriculum that promotes the model to more SHA-256 rounds only after reaching specific accuracy thresholds (e.g., 95% for 8 rounds).
+    Training automatically resumes from `checkpoints/`. It follows a curriculum that promotes the model to more SHA-256 rounds only after reaching specific accuracy thresholds (e.g., 80% for 8 rounds).
 
 -   **Interactive CLI:**
     ```bash

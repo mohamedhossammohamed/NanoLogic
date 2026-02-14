@@ -46,7 +46,7 @@ class Config:
     # Phase 1 (16r): Must hit 85%
     # Phase 2 (32r): Must hit 75%
     # Phase 3 (64r): Runs forever (Threshold > 1.0)
-    phase_accuracy_thresholds: List[float] = field(default_factory=lambda: [0.80, 0.70, 0.60, 0.55])
+    phase_accuracy_thresholds: List[float] = field(default_factory=lambda: [0.9, 0.9, 0.9, 0.8])
     
     # The Grind: Minimum steps to force in each phase before checking promotion
     phase_min_steps: List[int] = field(default_factory=lambda: [1000, 2000, 5000, 10000])
