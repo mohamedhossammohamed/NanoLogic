@@ -9,7 +9,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from config import Config
 from src.model.sparse_logic import SparseLogicTransformer
 
-def diagnose_gate(checkpoint_path, force_open=False):
+def diagnose_gate(checkpoint_path, force_open_val=None):
     print(f"📦 Loading checkpoint: {checkpoint_path}")
     try:
         ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
@@ -26,12 +26,15 @@ def diagnose_gate(checkpoint_path, force_open=False):
         gate_val = state_dict[gate_key].item()
         print(f"\n🚪 Recurrent Gate Value: {gate_val:.6f}")
         
-        if abs(gate_val) < 1e-6:
+        # Apply Force Open if requested
+        if force_open_val is not None:
+            print(f"   🔧 Force-Opening Gate to {force_open_val}...")
+            state_dict[gate_key].fill_(force_open_val)
+            print(f"   ✅ New Gate Value: {state_dict[gate_key].item():.6f}")
+            
+        elif abs(gate_val) < 1e-6:
             print("   ⚠️  WARNING: Gate is effectively DEAD (0.0). Recurrence is disabled.")
-            if force_open:
-                print("   🔧 Force-Opening Gate to 0.1...")
-                state_dict[gate_key].fill_(0.1)
-                print(f"   ✅ New Gate Value: {state_dict[gate_key].item():.6f}")
+            print("   💡 Use --force-open <value> to fix (e.g. 0.1 or 0.3).")
         else:
             print("   ✅ Gate is active (learning).")
     else:
@@ -64,7 +67,7 @@ def diagnose_gate(checkpoint_path, force_open=False):
         print("   ❌ No BitConvSwiGLU weights found!")
 
     # ── Save if Modified ────────────────────────────────────────────────
-    if force_open:
+    if force_open_val is not None:
         output_path = checkpoint_path.replace(".pt", "_fixed.pt")
         # Update checkpoint dictionary
         ckpt['model_state_dict'] = state_dict
@@ -74,7 +77,7 @@ def diagnose_gate(checkpoint_path, force_open=False):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Diagnose Recurrent Gate and ConvSwiGLU Weights")
     parser.add_argument("checkpoint", type=str, help="Path to checkpoint file")
-    parser.add_argument("--force-open", action="store_true", help="Set gate to 0.1 if dead")
+    parser.add_argument("--force-open", type=float, default=None, help="Force gate to specific value (e.g. 0.3)")
     args = parser.parse_args()
     
     if not os.path.exists(args.checkpoint):
