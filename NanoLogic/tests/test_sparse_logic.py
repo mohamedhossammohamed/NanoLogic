@@ -13,7 +13,7 @@ import os
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from config import Config
-from src.model.sparse_logic import SparseLogicBlock, SparseLogicTransformer
+from src.model.sparse_logic import SparseLogicBlock, SparseLogicTransformer, RecurrentSparseLogic, BitConvSwiGLU
 
 
 class TestSparseLogicBlock:
@@ -60,6 +60,11 @@ class TestSparseLogicBlock:
             isinstance(m, nn.LayerNorm) for m in block.modules()
         )
         assert has_norm, "No LayerNorm found — missing pre-norm"
+
+    def test_bit_conv_swiglu_structure(self, block):
+        """Verify BitConvSwiGLU components exist."""
+        assert hasattr(block, 'conv_swiglu'), "Block missing conv_swiglu"
+        assert isinstance(block.conv_swiglu, BitConvSwiGLU)
 
 
 class TestSparseLogicTransformer:
@@ -126,6 +131,60 @@ class TestSparseLogicTransformer:
         diffs = (out[0] - out[1]).abs().sum()
         assert diffs > 0, "All batch items have identical output"
 
+
+
+class TestRecurrentSparseLogic:
+    """Tests for the Recurrent Super-Block."""
+
+    @pytest.fixture
+    def config(self):
+        cfg = Config()
+        cfg.dim = 64
+        cfg.n_heads = 4
+        cfg.recurrent_loops = 3 # Small loop for testing
+        return cfg
+
+    @pytest.fixture
+    def block(self, config):
+        return RecurrentSparseLogic(config)
+
+    def test_output_shape(self, block):
+        """Output has same shape as input (B, 256, D)."""
+        x = torch.randn(2, 256, 64)
+        out = block(x)
+        assert out.shape == (2, 256, 64)
+
+    def test_gate_initialization(self, block):
+        """Gate should initialize to 0.0."""
+        assert block.gate.item() == 0.0
+
+    def test_loop_logic(self, block):
+        """
+        Verify that the loop actually runs and modifies the input.
+        If gate is 0, tanh(gate) is 0, so output should equal input (Identity).
+        """
+        # Case 1: Gate = 0 (Default) -> Identity
+        x = torch.randn(2, 256, 64)
+        out = block(x)
+        assert torch.allclose(x, out), "With gate=0, block should be identity"
+
+        # Case 2: Gate != 0 -> Transformation
+        block.gate.data.fill_(1.0) # tanh(1.0) ~= 0.76
+        out_active = block(x)
+        diff = (out_active - x).abs().sum()
+        assert diff > 0, "With gate=1, block should modify input"
+
+    def test_gradient_checkpointing_flag(self, block):
+        """Ensure check for training/eval mode doesn't crash."""
+        x = torch.randn(2, 256, 64, requires_grad=True)
+        block.train()
+        out = block(x)
+        assert out.requires_grad
+        
+        block.eval()
+        with torch.no_grad():
+            out_eval = block(x)
+        assert not out_eval.requires_grad
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

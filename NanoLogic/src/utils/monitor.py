@@ -59,11 +59,10 @@ class MemoryGuard:
         if self.step_counter % self.poll_interval != 0:
             return
 
-        # Check Total Usage (RAM + MPS estimate if separated)
-        # For the active guard, we rely on psutil.virtual_memory().used 
-        # because that's the system-wide truth for "Are we running out?"
-        vm = psutil.virtual_memory()
-        used_gb = vm.used / (1024 ** 3)
+        # Check Total Usage (RAM + MPS estimate)
+        # We now sum process RSS + MPS memory explicitly as requested.
+        ram_gb, mps_gb = self.get_total_memory_usage()
+        used_gb = ram_gb + mps_gb
         
         if used_gb > self.limit_gb:
             print(f"\n[MEMORY GUARD] ⚠️ RAM Warning: {used_gb:.2f}GB / {self.limit_gb}GB Limit")

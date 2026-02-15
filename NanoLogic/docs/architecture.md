@@ -141,3 +141,37 @@ for w in range(8):
 - **Total model**: ~36M parameters
 - **Storage**: ~25MB (ternary packed weights)
 - **Runtime RAM**: ~0.2GB on MPS
+
+---
+
+# NanoLogic Fixed-12 Architecture (Research 4)
+
+## Overview
+The **Fixed-12** architecture represents a pivot from deep feed-forward transformers to a **Recurrent Super-Block** design. This allows for deep logical reasoning (12+ steps) without the memory explosion associated with stacking 24+ physical layers.
+
+## Key Components
+
+### 1. Recurrent Sparse Logic (`RecurrentSparseLogic`)
+Instead of a list of layers, the model uses a **single** `SparseLogicBlock` instance iterated multiple times.
+- **Equation:** $H_{t+1} = H_t + \tanh(\text{gate}) \cdot \text{Block}(H_t)$
+- **Gate:** A learnable scalar parameter initialized to 0.0, allowing the network to gradually learn how much strictly new logic to inject at each step.
+- **Memory Efficiency:** Uses `torch.utils.checkpoint` to trade compute for RAM, enabling training within strict memory limits (e.g., 5GB RAM on M4).
+
+### 2. BitConvSwiGLU
+Replaces the standard MLP to capture local bit-level patterns more effectively.
+- **Structure:** `BitLinear(4x)` $\to$ `DepthwiseConv1d(k=3)` $\to$ `SiLU` $\to$ `BitLinear(proj)`
+- **Why?** The depthwise convolution allows the model to see immediate neighbors (e.g., $bit_{i-1}, bit_{i+1}$) in the 1D sequence, complementing the global sparse wiring.
+
+## Migration
+Legacy checkpoints (standard Transformer) must be migrated to the recurrent architecture using:
+```bash
+python3 tools/migrate_to_recurrent.py --input <old.pt> --output <new.pt>
+```
+Values from the middle layer (e.g., Layer 12) are typically used to initialize the recurrent block.
+
+### Recurrent Gate Diagnosis
+A critical component of the Fixed-12 architecture is the `gate` parameter.
+- **Initialization**: 0.0 (Identity Function).
+- **Issue**: If the gate remains at 0.0, the recurrent block effectively does nothing (skip connection only).
+- **Diagnosis**: Use `tools/diagnose_gate.py` to check if `gate` is non-zero (learning).
+- **Fix**: The tool can force-open the gate (e.g., to 0.1) if it remains dead after migration.

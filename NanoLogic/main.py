@@ -111,10 +111,15 @@ def main():
         try:
             ckpt = torch.load(resume_path, map_location=device, weights_only=False)
             model.load_state_dict(ckpt['model_state_dict'])
-            optimizer.load_state_dict(ckpt['optimizer_state_dict'])
+            
+            if ckpt.get('optimizer_state_dict') is not None:
+                optimizer.load_state_dict(ckpt['optimizer_state_dict'])
+                
             # Restore total_steps for logging continuity but keep phase from config.start_round
-            if 'scheduler_state_dict' in ckpt:
-                scheduler.total_steps = ckpt['scheduler_state_dict'].get('total_steps', 0)
+            if ckpt.get('scheduler_state_dict') is not None:
+                scheduler_state = ckpt['scheduler_state_dict']
+                if scheduler_state: # Check if not empty/None
+                     scheduler.total_steps = scheduler_state.get('total_steps', 0)
             elif 'step' in ckpt:
                 scheduler.total_steps = ckpt['step']
             resumed = True

@@ -14,7 +14,11 @@ class Config:
 
     # ── Wiring & Logic ──────────────────────────────────────────────────
     wiring_mode: str = "static_sha256"  # Hard-coded SHA-256 graph.
+    wiring_mode: str = "static_sha256"  # Hard-coded SHA-256 graph.
     rounds: int = 64            # The final goal.
+    
+    # ── Recurrent Architecture (Research 4) ─────────────────────────────
+    recurrent_loops: int = 12   # Number of iterations for the recurrent block.
 
     # ── Pathfinder (ResNet) ─────────────────────────────────────────────
     pathfinder_depth: int = 10  # Auxiliary network depth.
@@ -25,6 +29,7 @@ class Config:
     grad_accum_steps: int = 64  # Accumulate 32 micro-batches before stepping.
     num_workers: int = 0        # 0 = Main Thread (Crucial for MacOS/MPS stability).
     pin_memory: bool = False    # Disabled to save physical RAM.
+    use_checkpointing: bool = True # Enable gradient checkpointing for recurrent block.
 
     # ── Training ( The "Precision" Protocol ) ───────────────────────────
     lr: float = 3e-5            # WAS: 1e-4. Slowed down 3x for Lion stability.
@@ -42,11 +47,11 @@ class Config:
     curriculum_rounds: List[int] = field(default_factory=lambda: [8, 16, 32, 64])
     
     # The Bar: Accuracy required to graduate from each phase
-    # Phase 0 (8r): Must hit 95%
-    # Phase 1 (16r): Must hit 85%
+    # Phase 0 (8r): Must hit 85%
+    # Phase 1 (16r): Must hit 80%
     # Phase 2 (32r): Must hit 75%
-    # Phase 3 (64r): Runs forever (Threshold > 1.0)
-    phase_accuracy_thresholds: List[float] = field(default_factory=lambda: [0.9, 0.9, 0.9, 0.8])
+    # Phase 3 (64r): Runs forever (Threshold > 0.7)
+    phase_accuracy_thresholds: List[float] = field(default_factory=lambda: [0.85, 0.80, 0.80, 0.75])
     
     # The Grind: Minimum steps to force in each phase before checking promotion
     phase_min_steps: List[int] = field(default_factory=lambda: [1000, 2000, 5000, 10000])
