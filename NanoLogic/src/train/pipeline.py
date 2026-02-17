@@ -131,32 +131,38 @@ class SharedMemoryLoader:
             p.start()
             self.workers.append(p)
 
+        # 4. Pre-allocate Tensor Views (Zero-Copy Persistence)
+        # We create the wrappers ONCE to avoid malloc/free race conditions in the hot loop.
+        self.buffer_views = []
+        print("   allocating persistent buffer views...")
+        for shm in self.shm_blocks:
+            # 1. Numpy wrapper around shared memory
+            arr = np.ndarray((2 * self.flat_size,), dtype=np.int64, buffer=shm.buf)
+            
+            # 2. Torch wrapper (Zero-Copy)
+            tensor_data = torch.from_numpy(arr)
+            
+            # 3. Pre-sliced views
+            inputs_view = tensor_data[:self.flat_size].view(self.actual_batch_size, 256)
+            targets_view = tensor_data[self.flat_size:].view(self.actual_batch_size, 256)
+            
+            self.buffer_views.append((inputs_view, targets_view))
+
     def get_batch(self, device='cpu'):
         """
         Returns (inputs, targets) tensors on device.
         """
         try:
             # Wait for data
-            # blocks logic
             idx = self.full_queue.get(timeout=30.0) # 30s timeout to detect deadlocks
         except:
              return None, None
              
-        shm = self.shm_blocks[idx]
+        # Retrieve pre-allocated views (Zero-Malloc)
+        inputs_cpu, targets_cpu = self.buffer_views[idx]
         
-        # Zero-copy (?) read from shared memory
-        # We create a tensor from the buffer.
-        
-        arr = np.ndarray((2 * self.flat_size,), dtype=np.int64, buffer=shm.buf)
-        
-        # Create tensor (this is zero-copy on CPU usually)
-        tensor_data = torch.from_numpy(arr)
-        
-        # Split
-        inputs_cpu = tensor_data[:self.flat_size].view(self.actual_batch_size, 256)
-        targets_cpu = tensor_data[self.flat_size:].view(self.actual_batch_size, 256)
-        
-        # Move to MPS/GPU (this causes a copy, unavoidable)
+        # Move to MPS/GPU (this causes a copy, unavoidable for device transfer)
+        # valid non_blocking=True if pinned, but here we just do standard move
         inputs = inputs_cpu.to(device)
         targets = targets_cpu.to(device)
         

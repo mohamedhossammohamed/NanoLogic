@@ -30,10 +30,12 @@ class LionGaLore(Optimizer):
                 
                 if len(state) == 0:
                     state['step'] = 0
-                    state['exp_avg'] = torch.zeros_like(p, dtype=torch.bfloat16)
+                    # Standard Lion: Initialize on CPU to save GPU memory
+                    state['exp_avg'] = torch.zeros_like(p, dtype=torch.bfloat16, device='cpu')
 
                 state['step'] += 1
-                exp_avg = state['exp_avg']
+                # Move to parameter device for computation
+                exp_avg = state['exp_avg'].to(p.device)
                 
                 if weight_decay != 0:
                     p.data.mul_(1 - lr * weight_decay)
@@ -42,6 +44,7 @@ class LionGaLore(Optimizer):
                 p.add_(torch.sign(update), alpha=-lr)
                 
                 new_exp_avg = exp_avg.float() * beta2 + grad * (1 - beta2)
-                state['exp_avg'].copy_(new_exp_avg.bfloat16())
+                # Offload back to CPU
+                state['exp_avg'].copy_(new_exp_avg.bfloat16().to('cpu'), non_blocking=True)
 
         return loss

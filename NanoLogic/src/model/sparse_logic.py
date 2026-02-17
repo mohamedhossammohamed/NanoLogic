@@ -173,10 +173,14 @@ class RecurrentSparseLogic(nn.Module):
         
     def forward(self, x):
         # Loop with Gradient Checkpointing
-        for _ in range(self.loops):
+        for i in range(self.loops):
             if self.training:
                 # Use checkpointing for memory efficiency
                 delta = grad_checkpoint(self.block, x, use_reentrant=False)
+                
+                # Aggressive Memory Management: Flush GPU cache inside the loop
+                if i % 4 == 0:
+                    torch.mps.empty_cache()
             else:
                 delta = self.block(x)
                 

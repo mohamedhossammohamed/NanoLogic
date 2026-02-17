@@ -6,6 +6,7 @@ import gc
 import os
 import psutil
 import sys
+import logging
 
 # Append path to ensure imports work
 sys.path.append(".")
@@ -17,18 +18,39 @@ from src.train import StateMatchingLoss, CurriculumScheduler, infinite_trace_str
 from src.train.pipeline import SharedMemoryLoader
 from src.solver import SolverBridge
 from src.utils.monitor import MemoryGuard
+from src.utils.identity import ModelIdentity # [NEW]
 
 # ── IMPORTS FOR MIXED PRECISION ──────────────────────────────────────────────
 try:
     from torch.amp import autocast, GradScaler
+    pass
 except ImportError:
     from torch.cuda.amp import autocast, GradScaler
 
-# ── Directories ──────────────────────────────────────────────────────────────
-CHECKPOINT_DIR = os.path.join(os.path.dirname(__file__), "checkpoints")
-LOG_DIR = os.path.join(os.path.dirname(__file__), "logs")
-os.makedirs(CHECKPOINT_DIR, exist_ok=True)
-os.makedirs(LOG_DIR, exist_ok=True)
+# ── LOGGING UTILS ────────────────────────────────────────────────────────────
+class TeeLogger(object):
+    """
+    Writes output to both the console (stdout) and a log file.
+    Does NOT buffer; flushes immediately to capture crashes.
+    """
+    def __init__(self, filename):
+        self.terminal = sys.stdout
+        self.log = open(filename, "a", encoding="utf-8")
+
+    def write(self, message):
+        self.terminal.write(message)
+        self.log.write(message)
+        self.flush()
+
+    def flush(self):
+        self.terminal.flush()
+        self.log.flush()
+
+# Redirects stderr too
+class TeeErrorLogger(TeeLogger):
+    def __init__(self, filename):
+        self.terminal = sys.stderr
+        self.log = open(filename, "a", encoding="utf-8")
 
 
 def compute_accuracy(logits, targets):
@@ -40,8 +62,25 @@ def compute_accuracy(logits, targets):
 def main():
     print("🧠 Initializing Neuro-SHA-M4 System...")
 
-    # 1. Config
+    # 1. Config & Identity
     config = Config()
+    
+    # [NEW] Model Identity System
+    identity = ModelIdentity(config)
+    print(f"🆔 Model Identity: {identity.model_id}")
+    print(f"   Architecture: {config.dim}d / {config.n_layers}L / {config.n_heads}H")
+    
+    # Setup Isolated Workspace
+    # logs/<id>/ and checkpoints/<id>/
+    LOG_DIR, CHECKPOINT_DIR = identity.setup_workspace()
+    print(f"📂 Workspace: {LOG_DIR}")
+    
+    # [NEW] Enable Tee Logger (Console -> File)
+    console_log_path = os.path.join(LOG_DIR, "console.log")
+    sys.stdout = TeeLogger(console_log_path)
+    sys.stderr = TeeErrorLogger(console_log_path)
+    print(f"📝 Console logs mirrored to: {console_log_path}")
+
     device = "mps" if torch.backends.mps.is_available() else "cpu"
     print(f"✅ Device: {device}")
     
@@ -93,15 +132,21 @@ def main():
     grad_accum = config.grad_accum_steps
     print(f"📦 Gradient Accumulation: {grad_accum} micro-batches (effective batch = {config.batch_size * grad_accum})")
 
-    # ── AUTO-RESUME ──────────────────────────────────────────────────────
-    # Scan checkpoints/ for the latest saved state and resume automatically.
-    # NOTE: config.start_round controls the starting phase — we load model
-    # and optimizer weights but override the scheduler to start from the
-    # configured round.
+    # ── AUTO-RESUME (Scoped to this Model ID) ────────────────────────────
+    # Scan checkpoints/<id>/ for the latest saved state.
     resumed = False
+    
+    def get_step_from_filename(f):
+        if f == "neuro_sha_final.pt":
+            return float('inf')
+        try:
+            return int(f.split('_')[-1].split('.')[0])
+        except (ValueError, IndexError):
+            return -1
+
     ckpt_files = sorted(
         [f for f in os.listdir(CHECKPOINT_DIR) if f.endswith(".pt")],
-        key=lambda f: os.path.getmtime(os.path.join(CHECKPOINT_DIR, f)),
+        key=get_step_from_filename,
         reverse=True
     ) if os.path.isdir(CHECKPOINT_DIR) else []
 
@@ -112,23 +157,26 @@ def main():
             ckpt = torch.load(resume_path, map_location=device, weights_only=False)
             model.load_state_dict(ckpt['model_state_dict'])
             
+            if 'pathfinder_state_dict' in ckpt:
+                pathfinder.load_state_dict(ckpt['pathfinder_state_dict'])
+                print("   ✅ Resumed Pathfinder weights")
+            
             if ckpt.get('optimizer_state_dict') is not None:
                 optimizer.load_state_dict(ckpt['optimizer_state_dict'])
                 
-            # Restore total_steps for logging continuity but keep phase from config.start_round
+            # Restore FULL scheduler state (phase, steps, total_steps)
             if ckpt.get('scheduler_state_dict') is not None:
-                scheduler_state = ckpt['scheduler_state_dict']
-                if scheduler_state: # Check if not empty/None
-                     scheduler.total_steps = scheduler_state.get('total_steps', 0)
+                scheduler.load_state_dict(ckpt['scheduler_state_dict'])
+                print(f"   ✅ Resumed scheduler state | Phase: {scheduler.current_phase} | Total steps: {scheduler.total_steps}")
             elif 'step' in ckpt:
                 scheduler.total_steps = ckpt['step']
+                print(f"   ✅ Resumed total steps: {scheduler.total_steps}")
+            
             resumed = True
-            print(f"   ✅ Resumed model weights | Total steps so far: {scheduler.total_steps}")
-            print(f"   📍 Starting at Phase {scheduler.current_phase} ({scheduler.get_current_rounds()} rounds) per config.start_round={config.start_round}")
         except Exception as e:
             print(f"   ⚠️ Failed to load checkpoint ({e}). Starting fresh.")
     else:
-        print("🆕 No checkpoint found. Starting fresh.")
+        print("🆕 No checkpoint found for this configuration. Starting fresh.")
 
     # Print curriculum info
     thresholds_str = " | ".join(
@@ -146,6 +194,7 @@ def main():
     model.train()
 
     # ── Log File (APPEND mode — never lose history) ──────────────────────
+    # CSV Log now lives in logs/<id>/training.log
     log_path = os.path.join(LOG_DIR, "training.log")
     log_exists = os.path.isfile(log_path) and os.path.getsize(log_path) > 0
     log_file = open(log_path, "a")  # APPEND, not overwrite
@@ -156,6 +205,7 @@ def main():
     # Accumulators
     running_loss = 0.0
     running_acc = 0.0
+    log_steps_counter = 0 # Track actual steps for accurate averaging
     optimizer.zero_grad()
 
     # ── Initialize Shared Memory Loader ──────────────────────────────────
@@ -192,6 +242,7 @@ def main():
             acc_val = compute_accuracy(logits.detach(), targets)
             running_loss += loss_val
             running_acc += acc_val
+            log_steps_counter += 1
 
             # ── Step scheduler with accuracy (accuracy-gated promotion) ──
             _, phase_changed = scheduler.step(accuracy=acc_val)
@@ -202,7 +253,16 @@ def main():
                 
                 # Restart Loader for new curriculum phase
                 print("♻️  Restarting Data Loader for new curriculum phase...")
+                
+                # ── Safe Shutdown Sequence ──
+                del inputs, targets, logits, loss, scaled_loss
                 loader.shutdown()
+                
+                # Force cleanup of old shared memory views
+                gc.collect()
+                if torch.backends.mps.is_available():
+                    torch.mps.empty_cache()
+                
                 loader = SharedMemoryLoader(
                     batch_size=config.batch_size, 
                     rounds=new_rounds, 
@@ -234,10 +294,9 @@ def main():
             memory_guard.check()
 
             # ── Logging (every 10 steps) ─────────────────────────────────
-            # ── Logging (every 10 steps) ─────────────────────────────────
-            if scheduler.total_steps % 10 == 0:
-                avg_loss = running_loss / 10
-                avg_acc = running_acc / 10
+            if scheduler.total_steps % 10 == 0 and log_steps_counter > 0:
+                avg_loss = running_loss / log_steps_counter
+                avg_acc = running_acc / log_steps_counter
                 
                 # Precise Memory Tracking
                 cpu_gb, mps_gb = MemoryGuard.get_total_memory_usage()
@@ -254,6 +313,7 @@ def main():
 
                 running_loss = 0.0
                 running_acc = 0.0
+                log_steps_counter = 0
 
             # ── Periodic Checkpoint (every 500 steps) ────────────────────
             if scheduler.total_steps % 500 == 0:
@@ -261,6 +321,7 @@ def main():
                 torch.save({
                     'step': scheduler.total_steps,
                     'model_state_dict': model.state_dict(),
+                    'pathfinder_state_dict': pathfinder.state_dict(),
                     'optimizer_state_dict': optimizer.state_dict(),
                     'scheduler_state_dict': scheduler.state_dict(),
                     'loss': loss_val,
@@ -290,6 +351,7 @@ def main():
     torch.save({
         'step': scheduler.total_steps,
         'model_state_dict': model.state_dict(),
+        'pathfinder_state_dict': pathfinder.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
         'scheduler_state_dict': scheduler.state_dict(),
         'scaler_state_dict': scaler.state_dict(), # [NEW] Save scaler state
@@ -302,6 +364,7 @@ def main():
         loader.shutdown()
     print(f"\n✅ Training Complete. {scheduler.total_steps} steps executed.")
     print(f"📊 Logs: {log_path}")
+    print(f"📝 Console logs: {console_log_path}") # [NEW]
 
 
 if __name__ == "__main__":

@@ -1,0 +1,12 @@
+{
+    "id": "058b94ac",
+    "architecture": "Neuro-SHA-M4",
+    "dim": 1024,
+    "layers": 24,
+    "heads": 16,
+    "wiring": "static_sha256",
+    "rounds": 64,
+    "loops": 12,
+    "params_m": "76.15M (Est)",
+    "description": "Sparse Logic Transformer for SHA-256 Cryptanalysis"
+}
